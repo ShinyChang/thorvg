@@ -39,6 +39,7 @@
 static atomic<int32_t> rendererCnt{-1};
 
 static void _solidUniforms(GlShape& sdata, const RenderColor& c, RenderUpdateFlag flag, float* solidInfo);
+static bool _fastTransformMatch(const Matrix& lhs, const Matrix& rhs);
 
 
 void GlRenderer::clearDisposes()
@@ -966,7 +967,7 @@ bool GlRenderer::bounds(RenderData data, Point* pt4, const Matrix& m)
             tvg::BBox bbox;
             bbox.init();
             auto& vertexes = sdata->geometry.stroke.vertex;
-            if (m == sdata->geometry.matrix) {
+            if (_fastTransformMatch(m, sdata->geometry.matrix)) {
                 // Common AABB path: stroke vertices are already in world space.
                 for (uint32_t i = 0; i < vertexes.count / 2; i++) {
                     Point vert = {vertexes[i * 2 + 0], vertexes[i * 2 + 1]};
@@ -1442,4 +1443,12 @@ static void _solidUniforms(GlShape& sdata, const RenderColor& c, RenderUpdateFla
     solidInfo[1] = c.g / 255.f;
     solidInfo[2] = c.b / 255.f;
     solidInfo[3] = a / 255.f;
+}
+
+
+static bool _fastTransformMatch(const Matrix& lhs, const Matrix& rhs)
+{
+    return tvg::equal(lhs.e11, rhs.e11) && tvg::equal(lhs.e12, rhs.e12) && tvg::equal(lhs.e13, rhs.e13) &&
+           tvg::equal(lhs.e21, rhs.e21) && tvg::equal(lhs.e22, rhs.e22) && tvg::equal(lhs.e23, rhs.e23) &&
+           tvg::equal(lhs.e31, rhs.e31) && tvg::equal(lhs.e32, rhs.e32) && tvg::equal(lhs.e33, rhs.e33);
 }

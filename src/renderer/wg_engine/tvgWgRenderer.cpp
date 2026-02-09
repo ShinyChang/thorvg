@@ -21,6 +21,7 @@
  */
 
 #include <atomic>
+#include <cassert>
 #include "tvgTaskScheduler.h"
 #include "tvgWgRenderer.h"
 
@@ -30,6 +31,7 @@
 /************************************************************************/
 
 static atomic<int32_t> rendererCnt{-1};
+static bool _fastTransformMatch(const Matrix& lhs, const Matrix& rhs);
 
 
 void WgRenderer::release()
@@ -131,20 +133,20 @@ RenderData WgRenderer::prepare(const RenderShape& rshape, RenderData data, const
     auto renderDataShape = data ? (WgRenderDataShape*)data : mRenderDataShapePool.allocate(mContext);
 
     // update geometry
-    if (!data || (flags & (RenderUpdateFlag::Path | RenderUpdateFlag::Stroke))) {
+    if (!data || (flags & (RenderUpdateFlag::Transform | RenderUpdateFlag::Path | RenderUpdateFlag::Stroke))) {
         renderDataShape->updateMeshes(rshape, flags, transform);
     }
 
     // update transform
     if ((!data) || (flags & RenderUpdateFlag::Transform)) {
         renderDataShape->transform = transform;
-        renderDataShape->updateAABB(transform);
+        renderDataShape->updateAABB();
     }
 
     // update paint settings
     if ((!data) || (flags & (RenderUpdateFlag::Transform | RenderUpdateFlag::Blend | RenderUpdateFlag::Color))) {
-        renderDataShape->renderSettingsShape.update(mContext, transform, mTargetSurface.cs, opacity);
-        renderDataShape->renderSettingsStroke.update(mContext, transform, mTargetSurface.cs, opacity);
+        renderDataShape->renderSettingsShape.update(mContext, mTargetSurface.cs, opacity);
+        renderDataShape->renderSettingsStroke.update(mContext, mTargetSurface.cs, opacity);
         renderDataShape->fillRule = rshape.rule;
     }
 
@@ -153,13 +155,21 @@ RenderData WgRenderer::prepare(const RenderShape& rshape, RenderData data, const
     renderDataShape->updateVisibility(rshape, opacity);
     // update shape render settings
     if (!renderDataShape->renderSettingsShape.skip) {
-        if (flags & RenderUpdateFlag::Gradient && rshape.fill) renderDataShape->renderSettingsShape.update(mContext, rshape.fill);
-        else if (flags & RenderUpdateFlag::Color) renderDataShape->renderSettingsShape.update(mContext, rshape.color);
+        if (rshape.fill && (!data || (flags & (RenderUpdateFlag::Gradient | RenderUpdateFlag::Transform)))) {
+            bool updateColorRamp = !data || ((flags & RenderUpdateFlag::Gradient) != RenderUpdateFlag::None);
+            renderDataShape->renderSettingsShape.update(mContext, rshape.fill, &transform, updateColorRamp);
+        } else if (!data || (flags & RenderUpdateFlag::Color)) {
+            renderDataShape->renderSettingsShape.update(mContext, rshape.color);
+        }
     }
     // update strokes render settings
     if (rshape.stroke && !renderDataShape->renderSettingsStroke.skip) {
-        if (flags & RenderUpdateFlag::GradientStroke && rshape.stroke->fill) renderDataShape->renderSettingsStroke.update(mContext, rshape.stroke->fill);
-        else if (flags & RenderUpdateFlag::Stroke) renderDataShape->renderSettingsStroke.update(mContext, rshape.stroke->color);
+        if (rshape.stroke->fill && (!data || (flags & (RenderUpdateFlag::GradientStroke | RenderUpdateFlag::Transform)))) {
+            bool updateColorRamp = !data || ((flags & RenderUpdateFlag::GradientStroke) != RenderUpdateFlag::None);
+            renderDataShape->renderSettingsStroke.update(mContext, rshape.stroke->fill, &transform, updateColorRamp);
+        } else if (!data || (flags & RenderUpdateFlag::Stroke)) {
+            renderDataShape->renderSettingsStroke.update(mContext, rshape.stroke->color);
+        }
     }
 
     if (flags & RenderUpdateFlag::Clip) renderDataShape->updateClips(clips);
@@ -175,13 +185,14 @@ RenderData WgRenderer::prepare(RenderSurface* surface, RenderData data, const Ma
     // update paint settings
     renderDataPicture->viewport = vport;
     renderDataPicture->transform = transform;
-    if (flags & (RenderUpdateFlag::Transform | RenderUpdateFlag::Blend | RenderUpdateFlag::Color)) {
-        renderDataPicture->renderSettings.update(mContext, transform, surface->cs, opacity);
+    if (!data || (flags & (RenderUpdateFlag::Blend | RenderUpdateFlag::Color))) {
+        renderDataPicture->renderSettings.update(mContext, surface->cs, opacity);
     }
 
     // update image data
-    if (flags & (RenderUpdateFlag::Path | RenderUpdateFlag::Image)) {
-        renderDataPicture->updateSurface(mContext, surface);
+    if (!data || (flags & (RenderUpdateFlag::Transform | RenderUpdateFlag::Path | RenderUpdateFlag::Image))) {
+        bool updateTexture = !data || ((flags & (RenderUpdateFlag::Path | RenderUpdateFlag::Image)) != RenderUpdateFlag::None);
+        renderDataPicture->updateSurface(mContext, surface, transform, updateTexture);
     }
 
     if (flags & RenderUpdateFlag::Clip) renderDataPicture->updateClips(clips);
@@ -283,11 +294,25 @@ bool WgRenderer::bounds(RenderData data, Point* pt4, const Matrix& m)
                 tvg::BBox bbox;
                 bbox.init();
                 auto& vertexes = renderData->meshStrokes.vbuffer;
-                for (uint32_t i = 0; i < vertexes.count; i++) {
-                    Point vert = vertexes[i] * m;
-                    bbox.min = min(bbox.min, vert);
-                    bbox.max = max(bbox.max, vert);
+
+                if (_fastTransformMatch(m, renderData->transform)) {
+                    for (uint32_t i = 0; i < vertexes.count; i++) {
+                        Point vert = vertexes[i];
+                        bbox.min = min(bbox.min, vert);
+                        bbox.max = max(bbox.max, vert);
+                    }
+                } else {
+                    Matrix inverseModel{};
+                    inverse(&renderData->transform, &inverseModel);
+                    inverseModel *= m;
+                    for (uint32_t i = 0; i < vertexes.count; i++) {
+                        Point vert = vertexes[i];
+                        vert *= inverseModel;
+                        bbox.min = min(bbox.min, vert);
+                        bbox.max = max(bbox.max, vert);
+                    }
                 }
+
                 pt4[0] = bbox.min;
                 pt4[1] = {bbox.max.x, bbox.min.y};
                 pt4[2] = bbox.max;
@@ -654,4 +679,12 @@ WgRenderer* WgRenderer::gen(TVG_UNUSED uint32_t threads)
     }
 
     return new WgRenderer;
+}
+
+
+static bool _fastTransformMatch(const Matrix& lhs, const Matrix& rhs)
+{
+    return tvg::equal(lhs.e11, rhs.e11) && tvg::equal(lhs.e12, rhs.e12) && tvg::equal(lhs.e13, rhs.e13) &&
+           tvg::equal(lhs.e21, rhs.e21) && tvg::equal(lhs.e22, rhs.e22) && tvg::equal(lhs.e23, rhs.e23) &&
+           tvg::equal(lhs.e31, rhs.e31) && tvg::equal(lhs.e32, rhs.e32) && tvg::equal(lhs.e33, rhs.e33);
 }
