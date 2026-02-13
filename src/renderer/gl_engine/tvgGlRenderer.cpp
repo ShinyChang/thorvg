@@ -28,6 +28,7 @@
 #include "tvgGlRenderTask.h"
 #include "tvgGlProgram.h"
 #include "tvgGlShaderSrc.h"
+#include "tvgShape.h"
 #include "tvgRender.h"
 
 
@@ -38,6 +39,37 @@
 #define NOISE_LEVEL 0.5f
 
 static atomic<int32_t> rendererCnt{-1};
+
+// GL receives only RenderShape in prepare(). For shape draws this is ShapeImpl::rs,
+// so we recover the owning Paint by reversing that member offset.
+// If the common layer later exposes a direct owner accessor, prefer that
+// and drop this local helper.
+static const Paint* _shapePaint(const RenderShape* rshape)
+{
+    if (!rshape) return nullptr;
+
+    // RenderMethod::prepare(const RenderShape&) receives ShapeImpl::rs.
+    static const auto shapeOffset = []() 
+    {
+        ShapeImpl probe;
+        return reinterpret_cast<const uint8_t*>(&probe.rs) - reinterpret_cast<const uint8_t*>(&probe);
+    }();
+
+    auto shape = reinterpret_cast<const ShapeImpl*>(reinterpret_cast<const uint8_t*>(rshape) - shapeOffset);
+    return static_cast<const Paint*>(shape);
+}
+
+
+static const Paint* _pictureOwner(const RenderShape* rshape)
+{
+    auto paint = _shapePaint(rshape);
+    while (paint) {
+        if (paint->type() == Type::Picture) return paint;
+        paint = paint->parent();
+    }
+    return nullptr;
+}
+
 
 void GlRenderer::clearDisposes()
 {
@@ -182,8 +214,8 @@ void GlRenderer::drawPrimitive(GlShape& sdata, const RenderColor& c, RenderUpdat
     auto stencilMode = sdata.geometry.getStencilMode(flag);
 
     if (!blendShape && stencilMode == GlStencilMode::None) {
-        drawBatchedSolid(sdata, c, depth, viewRegion);
-        return;
+      mSolidBatch.draw(*this, sdata, c, depth, viewRegion);
+      return;
     }
 
     GlRenderTask* task = nullptr;
@@ -240,12 +272,6 @@ void GlRenderer::drawPrimitive(GlShape& sdata, const RenderColor& c, RenderUpdat
 
     if (stencilTask) currentPass()->addRenderTask(new GlStencilCoverTask(stencilTask, task, stencilMode));
     else currentPass()->addRenderTask(task);
-}
-
-
-void GlRenderer::drawBatchedSolid(GlShape& sdata, const RenderColor& c, int32_t depth, const RenderRegion& viewRegion)
-{
-    mSolidBatch.draw(*this, sdata, c, depth, viewRegion);
 }
 
 
@@ -1270,6 +1296,7 @@ RenderData GlRenderer::prepare(RenderSurface* image, RenderData data, const Matr
     //TODO: redefine GlImage.
     auto sdata = static_cast<GlShape*>(data);
     if (!sdata) sdata = new GlShape;
+    sdata->picture = nullptr;
     sdata->validFill = false;
 
     if (opacity == 0 || flags == RenderUpdateFlag::None) return data;
@@ -1307,6 +1334,7 @@ RenderData GlRenderer::prepare(const RenderShape& rshape, RenderData data, const
         sdata->rshape = &rshape;
         flags = RenderUpdateFlag::All;
     }
+    sdata->picture = _pictureOwner(&rshape);
 
     if ((opacity == 0 && !clipper) || flags == RenderUpdateFlag::None) return sdata;
 
@@ -1314,9 +1342,7 @@ RenderData GlRenderer::prepare(const RenderShape& rshape, RenderData data, const
     sdata->viewHt = static_cast<float>(surface.h);
     sdata->opacity = opacity;
 
-    if (flags & RenderUpdateFlag::Path) {
-        sdata->geometry = GlGeometry();
-    }
+    if (flags & RenderUpdateFlag::Path) sdata->geometry = GlGeometry();
     
     sdata->geometry.setMatrix(transform);
     sdata->geometry.viewport = vport;

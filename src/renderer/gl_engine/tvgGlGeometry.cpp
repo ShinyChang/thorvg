@@ -72,11 +72,11 @@ static PathKind _pathKind(const RenderPath& path)
             if (path.pts.count != ROUND_RECT_POINT_COUNT) return PathKind::None;
             if (_matchCommandPattern(path.cmds, ROUND_RECT_CW_CMDS)) return PathKind::RoundRectCW;
             if (_matchCommandPattern(path.cmds, ROUND_RECT_CCW_CMDS)) return PathKind::RoundRectCCW;
-            return PathKind::None; // Convexity check: it will be recognized CCW winding (-1).
+            return PathKind::None; // Unknown pattern: convexity check keeps fixed CCW winding (-1), no auto-detect.
         }
         default: break;
     }
-    return PathKind::None; // Convexity check: it will be recognized CCW winding (-1).
+    return PathKind::None; // Unknown pattern: convexity check keeps fixed CCW winding (-1), no auto-detect.
 }
 
 
@@ -98,6 +98,8 @@ static inline bool _edgesCross(const Point& p0, const Point& p1, const Point& p2
 }
 
 
+// Round-rect corners are cubic segments; if a corner's control-polygon edges cross,
+// that cubic can form a loop, so we must not keep the path marked as convex.
 static bool _rrCubicLoop(const RenderPath& path, PathKind kind)
 {
     if (kind != PathKind::RoundRectCW && kind != PathKind::RoundRectCCW) return false;
